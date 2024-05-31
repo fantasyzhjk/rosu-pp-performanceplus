@@ -18,11 +18,13 @@ pub struct ScalingFactor {
 }
 
 impl ScalingFactor {
+    const BROKEN_GAMEFIELD_ROUNDING_ALLOWANCE: f32 = 1.00041;
+
     pub fn new(cs: f64) -> Self {
-        let scale = (1.0 - 0.7 * (cs as f32 - 5.0) / 5.0) / 2.0;
+        let scale = ((1.0 - 0.7 * (cs as f32 - 5.0) / 5.0) / 2.0) * Self::BROKEN_GAMEFIELD_ROUNDING_ALLOWANCE;
 
         let radius = f64::from(OsuObject::OBJECT_RADIUS * scale);
-        let factor = OsuDifficultyObject::NORMALIZED_RADIUS / radius as f32;
+        let factor = OsuDifficultyObject::NORMALIZED_RADIUS as f32 / radius as f32;
 
         let factor_with_small_circle_bonus = if radius < 30.0 {
             factor * (1.0 + (30.0 - radius as f32).min(5.0) / 50.0)

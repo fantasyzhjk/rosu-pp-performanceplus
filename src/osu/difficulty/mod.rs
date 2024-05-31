@@ -1,4 +1,4 @@
-use std::{cmp, pin::Pin};
+use std::{borrow::Borrow, cmp, ops::Deref, pin::Pin};
 
 use crate::{
     any::difficulty::{skills::Skill, Difficulty},
@@ -29,31 +29,29 @@ const HD_FADE_OUT_DURATION_MULTIPLIER: f64 = 0.3;
 pub fn difficulty(difficulty: &Difficulty, converted: &OsuBeatmap<'_>) -> OsuDifficultyAttributes {
     let DifficultyValues {
         skills:
-            OsuSkills {
-                aim,
-                aim_no_sliders,
-                speed,
-                flashlight,
-            },
+            OsuSkills { aim, flow_aim, jump_aim, raw_aim, speed, stamina, rhythm },
         mut attrs,
     } = DifficultyValues::calculate(difficulty, converted);
 
     let aim_difficulty_value = aim.difficulty_value();
-    let aim_no_sliders_difficulty_value = aim_no_sliders.difficulty_value();
-    let speed_relevant_note_count = speed.relevant_note_count();
+    let flow_aim_difficulty_value = flow_aim.difficulty_value();
+    let jump_aim_difficulty_value = jump_aim.difficulty_value();
+    let raw_aim_difficulty_value = raw_aim.difficulty_value();
+    let stamina_difficulty_value = stamina.difficulty_value();
+    let rhythm_difficulty_value = rhythm.difficulty_value();
     let speed_difficulty_value = speed.difficulty_value();
-    let flashlight_difficulty_value = flashlight.difficulty_value();
 
-    let mods = difficulty.get_mods();
+    // let mods = difficulty.get_mods();
 
     DifficultyValues::eval(
         &mut attrs,
-        mods,
         aim_difficulty_value,
-        aim_no_sliders_difficulty_value,
+        flow_aim_difficulty_value,
+        jump_aim_difficulty_value,
+        raw_aim_difficulty_value,
+        stamina_difficulty_value,
+        rhythm_difficulty_value,
         speed_difficulty_value,
-        speed_relevant_note_count,
-        flashlight_difficulty_value,
     );
 
     attrs
@@ -119,24 +117,30 @@ impl DifficultyValues {
         let osu_object_iter = osu_objects.iter_mut().map(Pin::new);
 
         let diff_objects =
-            Self::create_difficulty_objects(difficulty, &scaling_factor, osu_object_iter);
+            Self::create_difficulty_objects(difficulty, &scaling_factor, osu_object_iter, time_preempt);
 
         let mut skills = OsuSkills::new(mods, &scaling_factor, &map_attrs, time_preempt);
 
         {
             let mut aim = Skill::new(&mut skills.aim, &diff_objects);
-            let mut aim_no_sliders = Skill::new(&mut skills.aim_no_sliders, &diff_objects);
+            let mut flow_aim = Skill::new(&mut skills.flow_aim, &diff_objects);
+            let mut jump_aim = Skill::new(&mut skills.jump_aim, &diff_objects);
+            let mut raw_aim = Skill::new(&mut skills.raw_aim, &diff_objects);
+            let mut stamina = Skill::new(&mut skills.stamina, &diff_objects);
+            let mut rhythm = Skill::new(&mut skills.rhythm, &diff_objects);
             let mut speed = Skill::new(&mut skills.speed, &diff_objects);
-            let mut flashlight = Skill::new(&mut skills.flashlight, &diff_objects);
 
             // The first hit object has no difficulty object
             let take_diff_objects = cmp::min(converted.hit_objects.len(), take).saturating_sub(1);
 
             for hit_object in diff_objects.iter().take(take_diff_objects) {
                 aim.process(hit_object);
-                aim_no_sliders.process(hit_object);
+                raw_aim.process(hit_object);
+                jump_aim.process(hit_object);
+                flow_aim.process(hit_object);
+                stamina.process(hit_object);
+                rhythm.process(hit_object);
                 speed.process(hit_object);
-                flashlight.process(hit_object);
             }
         }
 
@@ -146,71 +150,41 @@ impl DifficultyValues {
     /// Process the difficulty values and store the results in `attrs`.
     pub fn eval(
         attrs: &mut OsuDifficultyAttributes,
-        mods: u32,
         aim_difficulty_value: f64,
-        aim_no_sliders_difficulty_value: f64,
+        flow_aim_difficulty_value: f64,
+        jump_aim_difficulty_value: f64,
+        raw_aim_difficulty_value: f64,
+        stamina_difficulty_value: f64,
+        rhythm_difficulty_value: f64,
         speed_difficulty_value: f64,
-        speed_relevant_note_count: f64,
-        flashlight_difficulty_value: f64,
     ) {
-        let mut aim_rating = aim_difficulty_value.sqrt() * DIFFICULTY_MULTIPLIER;
-        let aim_rating_no_sliders = aim_no_sliders_difficulty_value.sqrt() * DIFFICULTY_MULTIPLIER;
-        let mut speed_rating = speed_difficulty_value.sqrt() * DIFFICULTY_MULTIPLIER;
-        let mut flashlight_rating = flashlight_difficulty_value.sqrt() * DIFFICULTY_MULTIPLIER;
+        let aim_rating = aim_difficulty_value.sqrt() * DIFFICULTY_MULTIPLIER;
+        let jump_aim_rating = jump_aim_difficulty_value.sqrt() * DIFFICULTY_MULTIPLIER;
+        let flow_aim_rating = flow_aim_difficulty_value.sqrt() * DIFFICULTY_MULTIPLIER;
+        let precision_rating = (aim_difficulty_value - raw_aim_difficulty_value).max(0.0).sqrt() * DIFFICULTY_MULTIPLIER;
+        let speed_rating = speed_difficulty_value.sqrt() * DIFFICULTY_MULTIPLIER;
+        let stamina_rating = stamina_difficulty_value.sqrt() * DIFFICULTY_MULTIPLIER;
+        let accuracy_rating = rhythm_difficulty_value.sqrt();
 
-        let slider_factor = if aim_rating > 0.0 {
-            aim_rating_no_sliders / aim_rating
-        } else {
-            1.0
-        };
+        
 
-        if mods.td() {
-            aim_rating = aim_rating.powf(0.8);
-            flashlight_rating = flashlight_rating.powf(0.8);
-        }
+        let star_rating = (aim_rating.powf(3.0) + speed_rating.max(stamina_rating).powf(3.0)).powf(1.0 / 3.0) * 1.6;
 
-        if mods.rx() {
-            aim_rating *= 0.9;
-            speed_rating = 0.0;
-            flashlight_rating *= 0.7;
-        }
-
-        let base_aim_performance =
-            (5.0 * (aim_rating / 0.0675).max(1.0) - 4.0).powf(3.0) / 100_000.0;
-        let base_speed_performance =
-            (5.0 * (speed_rating / 0.0675).max(1.0) - 4.0).powf(3.0) / 100_000.0;
-
-        let base_flashlight_performance = if mods.fl() {
-            flashlight_rating.powf(2.0) * 25.0
-        } else {
-            0.0
-        };
-
-        let base_performance = ((base_aim_performance).powf(1.1)
-            + (base_speed_performance).powf(1.1)
-            + (base_flashlight_performance).powf(1.1))
-        .powf(1.0 / 1.1);
-
-        let star_rating = if base_performance > 0.00001 {
-            PERFORMANCE_BASE_MULTIPLIER.cbrt()
-                * 0.027
-                * ((100_000.0 / 2.0_f64.powf(1.0 / 1.1) * base_performance).cbrt() + 4.0)
-        } else {
-            0.0
-        };
-
-        attrs.aim = aim_rating;
-        attrs.speed = speed_rating;
-        attrs.flashlight = flashlight_rating;
-        attrs.slider_factor = slider_factor;
         attrs.stars = star_rating;
-        attrs.speed_note_count = speed_relevant_note_count;
+        attrs.aim = aim_rating;
+        attrs.jump = jump_aim_rating;
+        attrs.flow = flow_aim_rating;
+        attrs.precision = precision_rating;
+        attrs.stamina = stamina_rating;
+        attrs.accuracy = accuracy_rating;
+        attrs.speed = speed_rating;
     }
 
     pub fn create_difficulty_objects<'a>(
         difficulty: &Difficulty,
         scaling_factor: &ScalingFactor,
         osu_objects: impl ExactSizeIterator<Item = Pin<&'a mut OsuObject>>,
+        time_preempt: f64
     ) -> Vec<OsuDifficultyObject<'a>> {
         let take = difficulty.get_passed_objects();
         let clock_rate = difficulty.get_clock_rate();
@@ -224,7 +198,9 @@ impl DifficultyValues {
         };
 
         let mut last_last = None;
-
+        let mut last_diff_object: Option<OsuDifficultyObject> = None;
+        let mut last_last_diff_object: Option<OsuDifficultyObject> = None;
+  
         osu_objects_iter
             .enumerate()
             .map(|(idx, h)| {
@@ -232,10 +208,16 @@ impl DifficultyValues {
                     h.get_ref(),
                     last.get_ref(),
                     last_last.as_deref(),
+                    last_diff_object,
+                    last_last_diff_object,
                     clock_rate,
+                    time_preempt,
                     idx,
                     scaling_factor,
                 );
+
+                last_last_diff_object = last_diff_object;
+                last_diff_object = Some(diff_object);
 
                 last_last = Some(last);
                 last = h;

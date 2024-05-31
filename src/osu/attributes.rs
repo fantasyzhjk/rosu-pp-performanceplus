@@ -5,14 +5,12 @@ use crate::osu::performance::OsuPerformance;
 pub struct OsuDifficultyAttributes {
     /// The difficulty of the aim skill.
     pub aim: f64,
-    /// The difficulty of the speed skill.
+    pub jump: f64,
+    pub flow: f64,
+    pub precision: f64,
     pub speed: f64,
-    /// The difficulty of the flashlight skill.
-    pub flashlight: f64,
-    /// The ratio of the aim strain with and without considering sliders
-    pub slider_factor: f64,
-    /// The number of clickable objects weighted by difficulty.
-    pub speed_note_count: f64,
+    pub stamina: f64,
+    pub accuracy: f64,
     /// The approach rate.
     pub ar: f64,
     /// The overall difficulty
@@ -55,16 +53,13 @@ pub struct OsuPerformanceAttributes {
     pub difficulty: OsuDifficultyAttributes,
     /// The final performance points.
     pub pp: f64,
-    /// The accuracy portion of the final pp.
-    pub pp_acc: f64,
-    /// The aim portion of the final pp.
     pub pp_aim: f64,
-    /// The flashlight portion of the final pp.
-    pub pp_flashlight: f64,
-    /// The speed portion of the final pp.
+    pub pp_jump_aim: f64,
+    pub pp_flow_aim: f64,
+    pub pp_precision: f64,
     pub pp_speed: f64,
-    /// Misses including an approximated amount of slider breaks
-    pub effective_miss_count: f64,
+    pub pp_stamina: f64,
+    pub pp_accuracy: f64,
 }
 
 impl OsuPerformanceAttributes {

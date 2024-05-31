@@ -5,10 +5,57 @@ use rosu_map::util::Pos;
 use crate::{
     any::difficulty::object::IDifficultyObject,
     osu::object::{OsuObject, OsuObjectKind},
+    util::pplus,
 };
 
-use super::{scaling_factor::ScalingFactor, HD_FADE_OUT_DURATION_MULTIPLIER};
+use super::{
+    scaling_factor::ScalingFactor,
+    HD_FADE_OUT_DURATION_MULTIPLIER,
+};
 
+#[derive(Clone, Copy)]
+pub struct OsuDifficultyNoBase {
+    pub idx: usize,
+    pub start_time: f64,
+    pub delta_time: f64,
+
+    pub strain_time: f64,
+    pub last_two_strain_time: f64,
+    pub raw_jump_dist: f64,
+    pub jump_dist: f64,
+    pub base_flow: f64,
+    pub flow: f64,
+    pub travel_dist: f64,
+    pub travel_time: f64,
+    pub angle: Option<f64>,
+    pub angle_leniency: f64,
+    pub preempt: f64,
+    stream_bpm: f64,
+}
+
+impl From<OsuDifficultyObject<'_>> for OsuDifficultyNoBase {
+    fn from(value: OsuDifficultyObject) -> Self {
+        OsuDifficultyNoBase {
+            idx: value.idx,
+            start_time: value.start_time,
+            delta_time: value.delta_time,
+            strain_time: value.strain_time,
+            last_two_strain_time: value.last_two_strain_time,
+            raw_jump_dist: value.raw_jump_dist,
+            jump_dist: value.jump_dist,
+            base_flow: value.base_flow,
+            flow: value.flow,
+            travel_dist: value.travel_dist,
+            travel_time: value.travel_time,
+            angle: value.angle,
+            angle_leniency: value.angle_leniency,
+            preempt: value.preempt,
+            stream_bpm: value.stream_bpm,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct OsuDifficultyObject<'a> {
     pub idx: usize,
     pub base: &'a OsuObject,
@@ -16,26 +63,35 @@ pub struct OsuDifficultyObject<'a> {
     pub delta_time: f64,
 
     pub strain_time: f64,
-    pub lazy_jump_dist: f64,
-    pub min_jump_dist: f64,
-    pub min_jump_time: f64,
+    pub last_two_strain_time: f64,
+    pub raw_jump_dist: f64,
+    pub jump_dist: f64,
+    pub base_flow: f64,
+    pub flow: f64,
     pub travel_dist: f64,
     pub travel_time: f64,
     pub angle: Option<f64>,
+    pub angle_leniency: f64,
+    pub preempt: f64,
+    stream_bpm: f64,
 }
 
 impl<'a> OsuDifficultyObject<'a> {
-    pub const NORMALIZED_RADIUS: f32 = 50.0;
+    pub const NORMALIZED_RADIUS: f64 = 52.0;
 
-    const MIN_DELTA_TIME: f64 = 25.0;
-    const MAX_SLIDER_RADIUS: f32 = Self::NORMALIZED_RADIUS * 2.4;
-    const ASSUMED_SLIDER_RADIUS: f32 = Self::NORMALIZED_RADIUS * 1.8;
+    const MIN_DELTA_TIME: f64 = 50.0;
+    const MIN_LAST_TWO_TIME: f64 = 100.0;
+    const MAX_SLIDER_RADIUS: f64 = Self::NORMALIZED_RADIUS * 2.4;
+    const ASSUMED_SLIDER_RADIUS: f64 = Self::NORMALIZED_RADIUS * 1.8;
 
     pub fn new(
         hit_object: &'a OsuObject,
         last_object: &'a OsuObject,
         last_last_object: Option<&OsuObject>,
+        last_diff_object: Option<OsuDifficultyObject<'a>>,
+        last_last_diff_object: Option<OsuDifficultyObject<'a>>,
         clock_rate: f64,
+        time_preempt: f64,
         idx: usize,
         scaling_factor: &ScalingFactor,
     ) -> Self {
@@ -44,100 +100,134 @@ impl<'a> OsuDifficultyObject<'a> {
 
         let strain_time = delta_time.max(Self::MIN_DELTA_TIME);
 
+        let last_two_strain_time = if let Some(last_last_object) = last_last_object {
+            ((hit_object.start_time - last_last_object.start_time) / clock_rate)
+                .max(Self::MIN_LAST_TWO_TIME)
+        } else {
+            Self::MIN_LAST_TWO_TIME
+        };
+
+        let stream_bpm = 15000.0 / strain_time;
+        let preempt = time_preempt / clock_rate;
+
         let mut this = Self {
             idx,
             base: hit_object,
             start_time,
             delta_time,
             strain_time,
-            lazy_jump_dist: 0.0,
-            min_jump_dist: 0.0,
-            min_jump_time: 0.0,
+            last_two_strain_time,
+            raw_jump_dist: 0.0,
+            jump_dist: 0.0,
+            base_flow: 0.0,
+            flow: 0.0,
             travel_dist: 0.0,
             travel_time: 0.0,
             angle: None,
+            angle_leniency: 0.0,
+            preempt,
+            stream_bpm,
         };
 
+        
         this.set_distances(last_object, last_last_object, clock_rate, scaling_factor);
-
+        this.set_flow_values(last_diff_object, last_last_diff_object);
+        
         this
     }
 
-    pub fn opacity_at(&self, time: f64, hidden: bool, time_preempt: f64, time_fade_in: f64) -> f64 {
-        if time > self.base.start_time {
-            // * Consider a hitobject as being invisible when its start time is passed.
-            // * In reality the hitobject will be visible beyond its start time up until its hittable window has passed,
-            // * but this is an approximation and such a case is unlikely to be hit where this function is used.
-            return 0.0;
-        }
+    pub fn set_flow_values(
+        &mut self,
+        last_diff_object: Option<OsuDifficultyObject>,
+        last_last_diff_object: Option<OsuDifficultyObject>,
+    ) {
+        let mut angle_scaling_factor = None;
+        let mut irregular_flow = 0.0;
+        
+        if let Some(last_diff_object) = last_diff_object {
+            if pplus::is_ratio_equal_less(0.667, self.strain_time, last_diff_object.strain_time) {
+                angle_scaling_factor = Some(1.0);
+            }
+            
+            if pplus::is_roughly_equal(self.strain_time, last_diff_object.strain_time) {
+                angle_scaling_factor = Some(if let Some(angle) = self.angle {
+                    if angle.is_nan() {
+                        0.5
+                    } else {
+                        let angle_scaling_factor =
+                        (-((angle.cos() * std::f64::consts::PI / 2.0).sin()) + 3.0) / 4.0;
+                        angle_scaling_factor
+                        + (1.0 - angle_scaling_factor) * last_diff_object.angle_leniency
+                    }
+                } else {
+                    0.5
+                });
 
-        let fade_in_start_time = self.base.start_time - time_preempt;
-        let fade_in_duration = time_fade_in;
-
-        if hidden {
-            // * Taken from OsuModHidden.
-            let fade_out_start_time = self.base.start_time - time_preempt + time_fade_in;
-            let fade_out_duration = time_preempt * HD_FADE_OUT_DURATION_MULTIPLIER;
-
-            (((time - fade_in_start_time) / fade_in_duration).clamp(0.0, 1.0))
-                .min(1.0 - ((time - fade_out_start_time) / fade_out_duration).clamp(0.0, 1.0))
+                let distance_offset = (((self.stream_bpm - 140.0) / 20.0).tanh() * 1.75 + 2.75) * Self::NORMALIZED_RADIUS;
+                irregular_flow = pplus::transition_to_false(self.jump_dist, distance_offset, distance_offset);
+                irregular_flow *= last_diff_object.base_flow;
+            }
         } else {
-            ((time - fade_in_start_time) / fade_in_duration).clamp(0.0, 1.0)
+            angle_scaling_factor = Some(1.0);
         }
+        
+        if let Some(last_last_diff_object) = last_last_diff_object {
+            if pplus::is_roughly_equal(self.strain_time, last_last_diff_object.strain_time) {
+                let distance_offset = (((self.stream_bpm - 140.0) / 20.0).tanh() * 1.75 + 2.75) * Self::NORMALIZED_RADIUS;
+                irregular_flow = pplus::transition_to_false(self.jump_dist, distance_offset, distance_offset);
+                irregular_flow *= last_last_diff_object.base_flow;
+            }
+        }
+
+        if let Some(angle_scaling_factor) = angle_scaling_factor {
+            let speed_flow = pplus::transition_to_true(self.stream_bpm, 90.0, 30.0);
+            let distance_offset = (((self.stream_bpm - 140.0) / 20.0).tanh() + 2.0) * Self::NORMALIZED_RADIUS;
+            self.base_flow = speed_flow * pplus::transition_to_false(self.jump_dist, distance_offset * angle_scaling_factor, distance_offset);
+        } else {
+            self.base_flow = 0.0;
+        }
+
+        if last_diff_object.is_some() {
+            self.angle_leniency = (1.0 - self.base_flow) * irregular_flow;
+            self.flow = self.base_flow.max(irregular_flow);
+        } else {
+            self.flow = self.base_flow;
+        }
+
     }
 
-    fn set_distances(
+    pub fn set_distances(
         &mut self,
         last_object: &OsuObject,
         last_last_object: Option<&OsuObject>,
         clock_rate: f64,
         scaling_factor: &ScalingFactor,
     ) {
-        if let OsuObjectKind::Slider(ref slider) = self.base.kind {
-            self.travel_dist = f64::from(
-                slider.lazy_travel_dist
-                    * ((1.0 + slider.repeat_count() as f64 / 2.5).powf(1.0 / 2.5)) as f32,
-            );
-
-            self.travel_time = (self.base.lazy_travel_time() / clock_rate)
-                .max(OsuDifficultyObject::MIN_DELTA_TIME);
-        }
-
-        if self.base.is_spinner() || last_object.is_spinner() {
-            return;
-        }
-
         let scaling_factor = scaling_factor.factor_with_small_circle_bonus;
+
+        if let OsuObjectKind::Circle = last_object.kind {
+            self.travel_time = self.strain_time;
+        }
+        
+        if let OsuObjectKind::Slider(ref slider) = last_object.kind {
+            self.travel_dist = f64::from(slider.lazy_travel_dist * scaling_factor);
+            self.travel_time =
+                ((self.start_time - last_object.end_time()) / clock_rate).max(Self::MIN_DELTA_TIME);
+        }
+
+        if let OsuObjectKind::Spinner(_) = last_object.kind {
+            self.travel_time =
+                ((self.start_time - last_object.end_time()) / clock_rate).max(Self::MIN_DELTA_TIME);
+        }
 
         let last_cursor_pos = Self::get_end_cursor_pos(last_object);
 
-        self.lazy_jump_dist = f64::from(
-            (self.base.stacked_pos() * scaling_factor - last_cursor_pos * scaling_factor).length(),
-        );
-        self.min_jump_time = self.strain_time;
-        self.min_jump_dist = self.lazy_jump_dist;
-
-        if let OsuObjectKind::Slider(ref last_slider) = last_object.kind {
-            let last_travel_time = (last_object.lazy_travel_time() / clock_rate)
-                .max(OsuDifficultyObject::MIN_DELTA_TIME);
-            self.min_jump_time =
-                (self.strain_time - last_travel_time).max(OsuDifficultyObject::MIN_DELTA_TIME);
-
-            let tail_pos = last_slider.tail().map_or(last_object.pos, |tail| tail.pos);
-            let stacked_tail_pos = tail_pos + last_object.stack_offset;
-
-            let tail_jump_dist =
-                (stacked_tail_pos - self.base.stacked_pos()).length() * scaling_factor;
-
-            let diff = f64::from(
-                OsuDifficultyObject::MAX_SLIDER_RADIUS - OsuDifficultyObject::ASSUMED_SLIDER_RADIUS,
-            );
-
-            let min = f64::from(tail_jump_dist - OsuDifficultyObject::MAX_SLIDER_RADIUS);
-            self.min_jump_dist = ((self.lazy_jump_dist - diff).min(min)).max(0.0);
+        if !self.base.is_spinner() {
+            self.raw_jump_dist = f64::from((self.base.stacked_pos() - last_cursor_pos).length());
+            self.jump_dist = self.raw_jump_dist * f64::from(scaling_factor);
         }
 
-        if let Some(last_last_object) = last_last_object.filter(|h| !h.is_spinner()) {
+        if let Some(last_last_object) = last_last_object {
             let last_last_cursor_pos = Self::get_end_cursor_pos(last_last_object);
 
             let v1 = last_last_cursor_pos - last_object.stacked_pos();
@@ -164,12 +254,12 @@ impl<'a> OsuDifficultyObject<'a> {
         };
 
         let mut curr_cursor_pos = pos + stack_offset;
-        let scaling_factor = f64::from(OsuDifficultyObject::NORMALIZED_RADIUS) / radius;
+        let scaling_factor = OsuDifficultyObject::NORMALIZED_RADIUS / radius;
 
         for (curr_movement_obj, i) in slider.nested_objects.iter().zip(1..) {
             let mut curr_movement = curr_movement_obj.pos + stack_offset - curr_cursor_pos;
             let mut curr_movement_len = scaling_factor * f64::from(curr_movement.length());
-            let mut required_movement = f64::from(OsuDifficultyObject::ASSUMED_SLIDER_RADIUS);
+            let mut required_movement = OsuDifficultyObject::ASSUMED_SLIDER_RADIUS;
 
             if i == slider.nested_objects.len() {
                 let lazy_movement = slider.lazy_end_pos - curr_cursor_pos;
@@ -180,7 +270,7 @@ impl<'a> OsuDifficultyObject<'a> {
 
                 curr_movement_len = scaling_factor * f64::from(curr_movement.length());
             } else if curr_movement_obj.is_repeat() {
-                required_movement = f64::from(OsuDifficultyObject::NORMALIZED_RADIUS);
+                required_movement = OsuDifficultyObject::NORMALIZED_RADIUS;
             }
 
             if curr_movement_len > required_movement {
@@ -190,6 +280,8 @@ impl<'a> OsuDifficultyObject<'a> {
                 slider.lazy_travel_dist += curr_movement_len as f32;
             }
 
+            
+            
             if i == slider.nested_objects.len() {
                 slider.lazy_end_pos = curr_cursor_pos;
             }

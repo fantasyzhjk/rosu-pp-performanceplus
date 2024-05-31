@@ -27,32 +27,26 @@ impl OsuStrainSkill {
 
     pub fn difficulty_value(
         self,
-        reduced_section_count: usize,
-        reduced_strain_baseline: f64,
-        decay_weight: f64,
-        difficulty_multiplier: f64,
     ) -> f64 {
         let mut difficulty = 0.0;
         let mut weight = 1.0;
 
         let mut peaks = self.get_curr_strain_peaks();
 
-        let peaks_iter = peaks.sorted_non_zero_iter_mut().take(reduced_section_count);
+        // let peaks_iter = peaks.sorted_non_zero_iter_mut().take(reduced_section_count);
 
-        for (i, strain) in peaks_iter.enumerate() {
-            let clamped = f64::from((i as f32 / reduced_section_count as f32).clamp(0.0, 1.0));
-            let scale = (lerp(1.0, 10.0, clamped)).log10();
-            *strain *= lerp(reduced_strain_baseline, 1.0, scale);
-        }
+        // for (i, strain) in peaks_iter.enumerate() {
+        //     let clamped = f64::from((i as f32 / reduced_section_count as f32).clamp(0.0, 1.0));
+        //     let scale = (lerp(1.0, 10.0, clamped)).log10();
+        //     *strain *= lerp(reduced_strain_baseline, 1.0, scale);
+        // }
 
-        peaks.sort_desc();
-
-        for strain in peaks.iter() {
+        for strain in peaks.sorted_non_zero_iter() {
             difficulty += strain * weight;
-            weight *= decay_weight;
+            weight *= Self::DECAY_WEIGHT;
         }
 
-        difficulty * difficulty_multiplier
+        difficulty
     }
 }
 

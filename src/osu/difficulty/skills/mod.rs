@@ -1,19 +1,26 @@
+use rhythm::RhythmComplexity;
+use stamina::Stamina;
+
 use crate::{model::beatmap::BeatmapAttributes, osu::object::OsuObject, util::mods::Mods};
 
-use self::{aim::Aim, flashlight::Flashlight, speed::Speed};
+use self::{aim::Aim, speed::Speed};
 
 use super::{scaling_factor::ScalingFactor, HD_FADE_IN_DURATION_MULTIPLIER};
 
 pub mod aim;
-pub mod flashlight;
 pub mod speed;
 pub mod strain;
+pub mod rhythm;
+pub mod stamina;
 
 pub struct OsuSkills {
     pub aim: Aim,
-    pub aim_no_sliders: Aim,
+    pub flow_aim: Aim,
+    pub jump_aim: Aim,
+    pub raw_aim: Aim,
     pub speed: Speed,
-    pub flashlight: Flashlight,
+    pub stamina: Stamina,
+    pub rhythm: RhythmComplexity,
 }
 
 impl OsuSkills {
@@ -23,7 +30,7 @@ impl OsuSkills {
         map_attrs: &BeatmapAttributes,
         time_preempt: f64,
     ) -> Self {
-        let hit_window = 2.0 * map_attrs.hit_windows.od;
+        // let hit_window = 2.0 * map_attrs.hit_windows.od;
 
         // * Preempt time can go below 450ms. Normally, this is achieved via the DT mod
         // * which uniformly speeds up all animations game wide regardless of AR.
@@ -39,16 +46,22 @@ impl OsuSkills {
             400.0 * (time_preempt / OsuObject::PREEMPT_MIN).min(1.0)
         };
 
-        let aim = Aim::new(true);
-        let aim_no_sliders = Aim::new(false);
-        let speed = Speed::new(hit_window);
-        let flashlight = Flashlight::new(mods, scaling_factor.radius, time_preempt, time_fade_in);
+        let aim = Aim::new(scaling_factor.radius, time_preempt, time_fade_in, mods, false, false, false);
+        let flow_aim = Aim::new(scaling_factor.radius, time_preempt, time_fade_in, mods, true, false, false);
+        let jump_aim = Aim::new(scaling_factor.radius, time_preempt, time_fade_in, mods, false, true, false);
+        let raw_aim = Aim::new(scaling_factor.radius, time_preempt, time_fade_in, mods, false, false, true);
+        let speed = Speed::new();
+        let stamina = Stamina::new();
+        let rhythm = RhythmComplexity::new();
 
         Self {
             aim,
-            aim_no_sliders,
+            flow_aim,
+            jump_aim,
+            raw_aim,
             speed,
-            flashlight,
+            stamina,
+            rhythm
         }
     }
 }

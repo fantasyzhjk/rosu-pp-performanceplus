@@ -12,12 +12,11 @@ use super::{
 pub struct OsuStrains {
     /// Strain peaks of the aim skill.
     pub aim: Vec<f64>,
-    /// Strain peaks of the aim skill without sliders.
-    pub aim_no_sliders: Vec<f64>,
-    /// Strain peaks of the speed skill.
+    pub jump: Vec<f64>,
+    pub flow: Vec<f64>,
+    pub raw: Vec<f64>,
     pub speed: Vec<f64>,
-    /// Strain peaks of the flashlight skill.
-    pub flashlight: Vec<f64>,
+    pub stamina: Vec<f64>,
 }
 
 impl OsuStrains {
@@ -30,17 +29,22 @@ pub fn strains(difficulty: &Difficulty, converted: &OsuBeatmap<'_>) -> OsuStrain
         skills:
             OsuSkills {
                 aim,
-                aim_no_sliders,
+                flow_aim,
+                jump_aim,
+                raw_aim,
                 speed,
-                flashlight,
+                stamina,
+                ..
             },
         attrs: _,
     } = DifficultyValues::calculate(difficulty, converted);
 
     OsuStrains {
         aim: aim.get_curr_strain_peaks().into_vec(),
-        aim_no_sliders: aim_no_sliders.get_curr_strain_peaks().into_vec(),
+        jump: jump_aim.get_curr_strain_peaks().into_vec(),
+        flow: flow_aim.get_curr_strain_peaks().into_vec(),
+        raw: raw_aim.get_curr_strain_peaks().into_vec(),
         speed: speed.get_curr_strain_peaks().into_vec(),
-        flashlight: flashlight.get_curr_strain_peaks().into_vec(),
+        stamina: stamina.get_curr_strain_peaks().into_vec(),
     }
 }

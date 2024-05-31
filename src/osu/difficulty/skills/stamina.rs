@@ -9,16 +9,16 @@ use crate::{
 
 use super::strain::OsuStrainSkill;
 
-const SKILL_MULTIPLIER: f64 = 2600.0;
-const STRAIN_DECAY_BASE: f64 = 0.1;
+const SKILL_MULTIPLIER: f64 = 2600.0 * 0.3;
+const STRAIN_DECAY_BASE: f64 = 0.45;
 
 #[derive(Clone)]
-pub struct Speed {
+pub struct Stamina {
     curr_strain: f64,
     inner: OsuStrainSkill,
 }
 
-impl Speed {
+impl Stamina {
     pub fn new() -> Self {
         Self {
             curr_strain: 0.0,
@@ -45,11 +45,11 @@ impl Speed {
     }
 }
 
-impl ISkill for Speed {
+impl ISkill for Stamina {
     type DifficultyObjects<'a> = [OsuDifficultyObject<'a>];
 }
 
-impl<'a> Skill<'a, Speed> {
+impl<'a> Skill<'a, Stamina> {
     fn calculate_initial_strain(&mut self, time: f64, curr: &'a OsuDifficultyObject<'a>) -> f64 {
         let prev_start_time = curr
             .previous(0, self.diff_objects)
@@ -93,7 +93,7 @@ impl<'a> Skill<'a, Speed> {
 
     fn strain_value_at(&mut self, curr: &'a OsuDifficultyObject<'a>) -> f64 {
         self.inner.curr_strain *= strain_decay(curr.strain_time, STRAIN_DECAY_BASE);
-        self.inner.curr_strain += SpeedEvaluator::evaluate_diff_of(curr) * SKILL_MULTIPLIER;
+        self.inner.curr_strain += StaminaEvaluator::evaluate_diff_of(curr) * SKILL_MULTIPLIER;
 
         self.inner.curr_strain
     }
@@ -101,17 +101,16 @@ impl<'a> Skill<'a, Speed> {
 
 
 
-struct SpeedEvaluator;
+struct StaminaEvaluator;
 
-impl SpeedEvaluator {
+impl StaminaEvaluator {
     fn evaluate_diff_of<'a>(
         curr: &'a OsuDifficultyObject<'a>,
     ) -> f64 {
         let ms = curr.last_two_strain_time / 2.0;
         
-        // Curves are similar to 2.5 / ms for tapValue and 1 / ms for streamValue, but scale better at high BPM.
-        let tap_value = 30.0 / (ms - 20.0).powf(2.0) + 2.0 / ms;
-        let stream_value = 12.5 / (ms - 20.0).powf(2.0) + 0.25 / ms + 0.005;
+        let tap_value = 2.0 / (ms - 20.0);
+        let stream_value = 1.0 / (ms - 20.0);
 
         (1.0 - curr.flow) * tap_value + curr.flow * stream_value
     }

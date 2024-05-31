@@ -13,6 +13,7 @@ use crate::{
 
 use super::{convert::OsuBeatmap, PLAYFIELD_BASE_SIZE};
 
+#[derive(Clone, Debug)]
 pub struct OsuObject {
     pub pos: Pos,
     pub start_time: f64,
@@ -145,12 +146,14 @@ impl OsuObject {
     }
 }
 
+#[derive(Clone, Debug)]
 pub enum OsuObjectKind {
     Circle,
     Slider(OsuSlider),
     Spinner(Spinner),
 }
 
+#[derive(Clone, Debug)]
 pub struct OsuSlider {
     pub end_time: f64,
     pub lazy_end_pos: Pos,
@@ -306,6 +309,7 @@ impl OsuSlider {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 pub struct NestedSliderObject {
     pub pos: Pos,
     pub start_time: f64,
@@ -318,6 +322,7 @@ impl NestedSliderObject {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum NestedSliderObjectKind {
     Repeat,
     Tail,

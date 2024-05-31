@@ -1,32 +1,57 @@
-use std::f64::consts::{FRAC_PI_2, PI};
+use std::{
+    collections::VecDeque,
+    f64::consts::PI,
+};
+
+use rosu_map::util::Pos;
 
 use crate::{
     any::difficulty::{
         object::IDifficultyObject,
         skills::{strain_decay, ISkill, Skill},
     },
-    osu::difficulty::object::OsuDifficultyObject,
-    util::{float_ext::FloatExt, strains_vec::StrainsVec},
+    osu::{difficulty::object::{OsuDifficultyNoBase, OsuDifficultyObject}, PLAYFIELD_BASE_SIZE},
+    util::{mods::Mods, pplus, strains_vec::StrainsVec},
 };
 
 use super::strain::OsuStrainSkill;
 
-const SKILL_MULTIPLIER: f64 = 23.55;
+const SKILL_MULTIPLIER: f64 = 1059.0;
 const STRAIN_DECAY_BASE: f64 = 0.15;
 
 #[derive(Clone)]
 pub struct Aim {
-    with_sliders: bool,
     curr_strain: f64,
     inner: OsuStrainSkill,
+    evaluator: AimEvaluator,
+    flow_aim: bool,
+    jump_aim: bool,
+    raw_aim: bool,
 }
 
 impl Aim {
-    pub fn new(with_sliders: bool) -> Self {
+    pub fn new(
+        radius: f64,
+        time_preempt: f64,
+        time_fade_in: f64,
+        mods: u32,
+        flow_aim: bool,
+        jump_aim: bool,
+        raw_aim: bool,
+    ) -> Self {
         Self {
-            with_sliders,
             curr_strain: 0.0,
             inner: OsuStrainSkill::default(),
+            evaluator: AimEvaluator {
+                radius,
+                time_preempt,
+                time_fade_in,
+                mods,
+                preempt_hit_objects: VecDeque::new(),
+            },
+            flow_aim,
+            jump_aim,
+            raw_aim,
         }
     }
 
@@ -45,16 +70,11 @@ impl Aim {
     }
 
     fn static_difficulty_value(skill: OsuStrainSkill) -> f64 {
-        skill.difficulty_value(
-            OsuStrainSkill::REDUCED_SECTION_COUNT,
-            OsuStrainSkill::REDUCED_STRAIN_BASELINE,
-            OsuStrainSkill::DECAY_WEIGHT,
-            OsuStrainSkill::DIFFICULTY_MULTIPLER,
-        )
+        skill.difficulty_value()
     }
 }
 
-impl ISkill for Aim {
+impl ISkill for Aim{
     type DifficultyObjects<'a> = [OsuDifficultyObject<'a>];
 }
 
@@ -102,172 +122,388 @@ impl<'a> Skill<'a, Aim> {
 
     fn strain_value_at(&mut self, curr: &'a OsuDifficultyObject<'a>) -> f64 {
         self.inner.curr_strain *= strain_decay(curr.delta_time, STRAIN_DECAY_BASE);
-        self.inner.curr_strain +=
-            AimEvaluator::evaluate_diff_of(curr, self.diff_objects, self.inner.with_sliders)
-                * SKILL_MULTIPLIER;
+        self.inner.curr_strain += self.inner.evaluator.evaluate_diff_of(
+            curr,
+            self.diff_objects,
+            self.inner.flow_aim,
+            self.inner.jump_aim,
+            self.inner.raw_aim,
+        ) * SKILL_MULTIPLIER;
 
         self.inner.curr_strain
     }
 }
 
-struct AimEvaluator;
+#[derive(Clone)]
+struct AimEvaluator {
+    time_preempt: f64,
+    time_fade_in: f64,
+    radius: f64,
+    mods: u32,
+    preempt_hit_objects: VecDeque<OsuDifficultyNoBase>,
+}
 
 impl AimEvaluator {
-    const WIDE_ANGLE_MULTIPLIER: f64 = 1.5;
-    const ACUTE_ANGLE_MULTIPLIER: f64 = 1.95;
-    const SLIDER_MULTIPLIER: f64 = 1.35;
-    const VELOCITY_CHANGE_MULTIPLIER: f64 = 0.75;
-
     fn evaluate_diff_of<'a>(
+        &mut self,
         curr: &'a OsuDifficultyObject<'a>,
         diff_objects: &'a [OsuDifficultyObject<'a>],
-        with_sliders: bool,
+        flow_aim: bool,
+        jump_aim: bool,
+        raw_aim: bool,
     ) -> f64 {
         let osu_curr_obj = curr;
 
-        let Some((osu_last_last_obj, osu_last_obj)) = curr
-            .previous(1, diff_objects)
-            .zip(curr.previous(0, diff_objects))
-            .filter(|(_, last)| !(curr.base.is_spinner() || last.base.is_spinner()))
-        else {
+        let prev2s: Vec<OsuDifficultyObject> = curr
+            .previous(0, diff_objects)
+            .into_iter()
+            .chain(curr.previous(1, diff_objects)).copied()
+            .collect();
+
+        let aim = if flow_aim {
+            Self::calc_flow_aim_value(osu_curr_obj, prev2s.first())
+                * Self::calc_small_circle_bonus(self.radius)
+        } else if jump_aim {
+            Self::calc_jump_aim_value(osu_curr_obj, &prev2s, false)
+                * Self::calc_small_circle_bonus(self.radius)
+        } else if raw_aim {
+            Self::calc_flow_aim_value(osu_curr_obj, prev2s.first())
+                + Self::calc_jump_aim_value(osu_curr_obj, &prev2s, true)
+        } else {
+            (Self::calc_flow_aim_value(osu_curr_obj, prev2s.first())
+                + Self::calc_jump_aim_value(osu_curr_obj, &prev2s, false))
+                * Self::calc_small_circle_bonus(self.radius)
+        };
+        
+        let reading_multiplier = Self::calc_reading_multiplier(
+            &mut self.preempt_hit_objects,
+            osu_curr_obj,
+            self.mods.hd(),
+            self.mods.fl(),
+            self.radius,
+        );
+
+        aim * reading_multiplier
+    }
+
+    fn calc_jump_aim_value(
+        curr: &OsuDifficultyObject,
+        prev2s: &[OsuDifficultyObject],
+        raw: bool,
+    ) -> f64 {
+        if (curr.flow - 1.0).abs() < f64::EPSILON {
             return 0.0;
         };
 
-        // * Calculate the velocity to the current hitobject, which starts
-        // * with a base distance / time assuming the last object is a hitcircle.
-        let mut curr_vel = osu_curr_obj.lazy_jump_dist / osu_curr_obj.strain_time;
+        let distance = if raw {
+            curr.raw_jump_dist
+        } else {
+            curr.jump_dist
+        } / OsuDifficultyObject::NORMALIZED_RADIUS;
 
-        // * But if the last object is a slider, then we extend the travel
-        // * velocity through the slider into the current object.
-        if osu_last_obj.base.is_slider() && with_sliders {
-            // * calculate the slider velocity from slider head to slider end.
-            let travel_vel = osu_last_obj.travel_dist / osu_last_obj.travel_time;
-            // * calculate the movement velocity from slider end to current object
-            let movement_vel = osu_curr_obj.min_jump_dist / osu_curr_obj.min_jump_time;
+        let jump_aim_base = distance / curr.strain_time;
 
-            // * take the larger total combined velocity.
-            curr_vel = curr_vel.max(movement_vel + travel_vel);
-        }
+        let pattern_weight = Self::calc_jump_pattern_weight(curr, prev2s);
 
-        // * As above, do the same for the previous hitobject.
-        let mut prev_vel = osu_last_obj.lazy_jump_dist / osu_last_obj.strain_time;
+        let (location_weight, angle_weight) = if let Some(prev) = prev2s.iter().next() {
+            (
+                Self::calc_location_weight(curr.base.pos, prev.base.pos),
+                Self::calc_jump_angle_weight(
+                    curr.angle,
+                    curr.strain_time,
+                    prev.strain_time,
+                    prev.jump_dist,
+                ),
+            )
+        } else {
+            (
+                1.0,
+                Self::calc_jump_angle_weight(curr.angle, curr.strain_time, 0.0, 0.0),
+            )
+        };
 
-        if osu_last_last_obj.base.is_slider() && with_sliders {
-            let travel_vel = osu_last_last_obj.travel_dist / osu_last_last_obj.travel_time;
-            let movement_vel = osu_last_obj.min_jump_dist / osu_last_obj.min_jump_time;
+        let jump_aim = jump_aim_base * angle_weight * pattern_weight * location_weight;
+        jump_aim * (1.0 - curr.flow)
+    }
 
-            prev_vel = prev_vel.max(movement_vel + travel_vel);
-        }
+    fn calc_flow_aim_value(curr: &OsuDifficultyObject, prev: Option<&OsuDifficultyObject>) -> f64 {
+        if curr.flow == 0.0 {
+            return 0.0;
+        };
 
-        let mut wide_angle_bonus = 0.0;
-        let mut acute_angle_bonus = 0.0;
-        let mut slider_bonus = 0.0;
-        let mut vel_change_bonus = 0.0;
+        let distance = curr.jump_dist / OsuDifficultyObject::NORMALIZED_RADIUS;
 
-        // * Start strain with regular velocity.
-        let mut aim_strain = curr_vel;
+        // The 1.9 exponent roughly equals the inherent BPM based scaling the strain mechanism adds in the relevant BPM range.
+        // This way the aim value of streams stays more or less consistent for a given velocity.
+        // (300 BPM 20 spacing compared to 150 BPM 40 spacing for example.)
+        let flow_aim_base = (1.0 + (distance - 2.0).tanh()) * 2.5 / curr.strain_time
+            + (distance / 5.0) / curr.strain_time;
 
-        // * If rhythms are the same.
-        if osu_curr_obj.strain_time.max(osu_last_obj.strain_time)
-            < 1.25 * osu_curr_obj.strain_time.min(osu_last_obj.strain_time)
+        
+            
+        let angle_weight = Self::calc_flow_angle_weight(curr.angle);
+        let pattern_weight = Self::calc_flow_pattern_weight(curr, prev, distance);
+        let location_weight = if let Some(prev) = prev {
+            Self::calc_location_weight(curr.base.pos, prev.base.pos)
+        } else {
+            1.0
+        };
+
+
+        let flow_aim =
+            flow_aim_base * angle_weight * pattern_weight * (1.0 + (location_weight - 1.0) / 2.0);
+        flow_aim * curr.flow
+    }
+
+    fn calc_reading_multiplier<'a>(
+        preempt_hit_objects: &mut VecDeque<OsuDifficultyNoBase>,
+        curr: &'a OsuDifficultyObject<'a>,
+        has_hidden: bool,
+        has_fl: bool,
+        radius: f64,
+    ) -> f64 {
+        while !preempt_hit_objects.is_empty()
+            && preempt_hit_objects.front().unwrap().start_time < curr.start_time - curr.preempt
         {
-            if let Some(((curr_angle, last_angle), last_last_angle)) = osu_curr_obj
-                .angle
-                .zip(osu_last_obj.angle)
-                .zip(osu_last_last_obj.angle)
+            preempt_hit_objects.pop_front();
+        }
+
+        let mut reading_strain = 0.0;
+        for prev in preempt_hit_objects.iter() {
+            reading_strain += Self::calc_reading_density(prev.base_flow, prev.jump_dist);
+        }
+
+        // ~10-15% relative aim bonus at higher density values.
+        let density_bonus = reading_strain.powf(1.5) / 100.0;
+
+        let reading_multiplier = if has_hidden {
+            1.05 + density_bonus * 1.5 // 5% flat aim bonus and density bonus increased by 50%.
+        } else {
+            1.0 + density_bonus
+        };
+
+        let flashlight_multiplier =
+            Self::calc_flashlight_multiplier(has_fl, curr.raw_jump_dist, radius);
+        let high_approach_rate_multiplier = Self::calc_high_ar_multiplier(curr.preempt);
+
+        preempt_hit_objects.push_back(OsuDifficultyNoBase::from(*curr));
+
+        reading_multiplier * flashlight_multiplier * high_approach_rate_multiplier
+    }
+
+    fn calc_jump_pattern_weight(curr: &OsuDifficultyObject, prev2s: &[OsuDifficultyObject]) -> f64 {
+        let mut jump_pattern_weight = 1.0;
+        for (i, previous_object) in prev2s.iter().enumerate() {
+            let mut velocity_weight = 1.05;
+            if previous_object.jump_dist > 0.0 {
+                let velocity_ratio = (curr.jump_dist / curr.strain_time)
+                    / (previous_object.jump_dist / previous_object.strain_time)
+                    - 1.0;
+                if velocity_ratio <= 0.0 {
+                    velocity_weight = 1.0 + velocity_ratio * velocity_ratio / 2.0;
+                } else if velocity_ratio < 1.0 {
+                    velocity_weight =
+                        1.0 + (-((velocity_ratio * PI).cos()) + 1.0) / 40.0;
+                }
+            }
+
+            let mut angle_weight = 1.0;
+            if pplus::is_ratio_equal(1.0, curr.strain_time, previous_object.strain_time)
+                && !pplus::is_null_or_nan(curr.angle)
+                && !pplus::is_null_or_nan(previous_object.angle)
             {
-                // * Rewarding angles, take the smaller velocity as base.
-                let angle_bonus = curr_vel.min(prev_vel);
-
-                wide_angle_bonus = Self::calc_wide_angle_bonus(curr_angle);
-                acute_angle_bonus = Self::calc_acute_angle_bonus(curr_angle);
-
-                // * Only buff deltaTime exceeding 300 bpm 1/2.
-                if osu_curr_obj.strain_time > 100.0 {
-                    acute_angle_bonus = 0.0;
+                let angle_change =
+                    (curr.angle.unwrap().abs() - previous_object.angle.unwrap().abs()).abs();
+                if angle_change >= PI / 1.5 {
+                    angle_weight = 1.05;
                 } else {
-                    let base1 =
-                        (FRAC_PI_2 * ((100.0 - osu_curr_obj.strain_time) / 25.0).min(1.0)).sin();
+                    angle_weight = 1.0
+                        + (-((angle_change * 1.5).cos() * PI / 2.0).sin() + 1.0)
+                            / 40.0;
+                }
+            }
 
-                    let base2 = (FRAC_PI_2
-                        * ((osu_curr_obj.lazy_jump_dist).clamp(50.0, 100.0) - 50.0)
-                        / 50.0)
-                        .sin();
+            jump_pattern_weight *= (velocity_weight * angle_weight).powf(2.0 - i as f64);
+        }
 
-                    // * Multiply by previous angle, we don't want to buff unless this is a wiggle type pattern.
-                    acute_angle_bonus *= Self::calc_acute_angle_bonus(last_angle)
-                    // * The maximum velocity we buff is equal to 125 / strainTime
-                        * angle_bonus.min(125.0 / osu_curr_obj.strain_time)
-                        // * scale buff from 150 bpm 1/4 to 200 bpm 1/4
-                        * base1.powf(2.0)
-                         // * Buff distance exceeding 50 (radius) up to 100 (diameter).
-                        * base2.powf(2.0);
+        let mut distance_requirement = 0.0;
+        if let Some(prev) = prev2s.iter().next() {
+            distance_requirement =
+                Self::calc_distance_requirement(curr.strain_time, prev.strain_time, prev.jump_dist);
+        }
+
+        1.0 + (jump_pattern_weight - 1.0) * distance_requirement
+    }
+
+    fn calc_flow_pattern_weight(
+        curr: &OsuDifficultyObject,
+        prev: Option<&OsuDifficultyObject>,
+        distance: f64,
+    ) -> f64 {
+        if let Some(prev) = prev {
+            let distance_rate = if prev.jump_dist > 0.0 {
+                curr.jump_dist / prev.jump_dist - 1.0
+            } else {
+                1.0
+            };
+
+            let distance_bonus = if distance_rate <= 0.0 {
+                distance_rate * distance_rate
+            } else if distance_rate < 1.0 {
+                (-((PI * distance_rate).cos()) + 1.0) / 2.0
+            } else {
+                1.0
+            };
+
+
+
+            let angle_bonus = if !pplus::is_null_or_nan(curr.angle)
+                && !pplus::is_null_or_nan(prev.angle)
+            {
+                let (cangle, pangle) = (curr.angle.unwrap(), prev.angle.unwrap());
+                let mut angle_bonus = 0.0;
+                if cangle > 0.0 && pangle < 0.0 || cangle < 0.0 && pangle > 0.0 {
+                    let angle_change = if cangle.abs() > (PI - pangle.abs()) / 2.0
+                    {
+                        PI - cangle.abs()
+                    } else {
+                        pangle.abs() - cangle.abs()
+                    };
+                    angle_bonus =
+                        (-((angle_change / 2.0).sin() * PI).cos() + 1.0) / 2.0;
+                } else if cangle.abs() < pangle.abs() {
+                    let angle_change = cangle - pangle;
+                    angle_bonus =
+                        (-((angle_change / 2.0).sin() * PI).cos() + 1.0) / 2.0;
+                };
+
+                if angle_bonus > 0.0 {
+                    let angle_change = cangle.abs() - pangle.abs();
+                    angle_bonus =
+                        ((-((angle_change / 2.0).sin() * PI).cos() + 1.0) / 2.0)
+                            .min(angle_bonus);
                 }
 
-                // * Penalize wide angles if they're repeated, reducing the penalty as the lastAngle gets more acute.
-                wide_angle_bonus *= angle_bonus
-                    * (1.0
-                        - wide_angle_bonus.min(Self::calc_wide_angle_bonus(last_angle).powf(3.0)));
-                // * Penalize acute angles if they're repeated, reducing the penalty as the lastLastAngle gets more obtuse.
-                acute_angle_bonus *= 0.5
-                    + 0.5
-                        * (1.0
-                            - acute_angle_bonus
-                                .min(Self::calc_acute_angle_bonus(last_last_angle).powf(3.0)));
+                angle_bonus
+            } else {
+                0.0
+            };
+
+            
+            
+            let stream_jump_rate = pplus::transition_to_true(distance_rate, 0.0, 1.0);
+            let distance_weight = (1.0 + distance_bonus)
+            * Self::calc_stream_jump_weight(curr.jump_dist, stream_jump_rate, distance);
+            let angle_weight = 1.0 + angle_bonus * (1.0 - stream_jump_rate);
+
+            1.0 + (distance_weight * angle_weight - 1.0) * prev.flow
+        } else {
+            1.0
+        }
+    }
+
+    fn calc_jump_angle_weight(
+        angle: Option<f64>,
+        delta_time: f64,
+        previous_delta_time: f64,
+        previous_distance: f64,
+    ) -> f64 {
+        if let Some(angle) = angle {
+            if angle.is_nan() {
+                1.0
+            } else {
+                let distance_requirement = Self::calc_distance_requirement(
+                    delta_time,
+                    previous_delta_time,
+                    previous_distance,
+                );
+                1.0 + (-((angle.cos() * PI / 2.0).sin()) + 1.0) / 10.0
+                    * distance_requirement
             }
+        } else {
+            1.0
         }
-
-        if prev_vel.max(curr_vel).not_eq(0.0) {
-            // * We want to use the average velocity over the whole object when awarding
-            // * differences, not the individual jump and slider path velocities.
-            prev_vel = (osu_last_obj.lazy_jump_dist + osu_last_last_obj.travel_dist)
-                / osu_last_obj.strain_time;
-            curr_vel =
-                (osu_curr_obj.lazy_jump_dist + osu_last_obj.travel_dist) / osu_curr_obj.strain_time;
-
-            // * Scale with ratio of difference compared to 0.5 * max dist.
-            let dist_ratio_base =
-                (FRAC_PI_2 * (prev_vel - curr_vel).abs() / prev_vel.max(curr_vel)).sin();
-            let dist_ratio = dist_ratio_base.powf(2.0);
-
-            // * Reward for % distance up to 125 / strainTime for overlaps where velocity is still changing.
-            let overlap_vel_buff = (125.0 / osu_curr_obj.strain_time.min(osu_last_obj.strain_time))
-                .min((prev_vel - curr_vel).abs());
-
-            vel_change_bonus = overlap_vel_buff * dist_ratio;
-
-            // * Penalize for rhythm changes.
-            let bonus_base = (osu_curr_obj.strain_time).min(osu_last_obj.strain_time)
-                / (osu_curr_obj.strain_time).max(osu_last_obj.strain_time);
-            vel_change_bonus *= bonus_base.powf(2.0);
-        }
-
-        if osu_last_obj.base.is_slider() {
-            // * Reward sliders based on velocity.
-            slider_bonus = osu_last_obj.travel_dist / osu_last_obj.travel_time;
-        }
-
-        // * Add in acute angle bonus or wide angle bonus + velocity change bonus, whichever is larger.
-        aim_strain += (acute_angle_bonus * Self::ACUTE_ANGLE_MULTIPLIER).max(
-            wide_angle_bonus * Self::WIDE_ANGLE_MULTIPLIER
-                + vel_change_bonus * Self::VELOCITY_CHANGE_MULTIPLIER,
-        );
-
-        // * Add in additional slider velocity bonus.
-        if with_sliders {
-            aim_strain += slider_bonus * Self::SLIDER_MULTIPLIER;
-        }
-
-        aim_strain
     }
 
-    fn calc_wide_angle_bonus(angle: f64) -> f64 {
-        (3.0 / 4.0 * ((5.0 / 6.0 * PI).min(angle.max(PI / 6.0)) - PI / 6.0))
-            .sin()
-            .powf(2.0)
+    fn calc_flow_angle_weight(angle: Option<f64>) -> f64 {
+        if let Some(angle) = angle {
+            if angle.is_nan() {
+                1.0
+            } else {
+                1.0 + (angle.cos() + 1.0) / 10.0
+            }
+        } else {
+            1.0
+        }
     }
 
-    fn calc_acute_angle_bonus(angle: f64) -> f64 {
-        1.0 - Self::calc_wide_angle_bonus(angle)
+    fn calc_stream_jump_weight(jump_dist: f64, stream_jump_rate: f64, distance: f64) -> f64 {
+        if jump_dist > 0.0 {
+            let flow_aim_revert_factor =
+                1.0 / (((distance - 2.0).tanh() + 1.0) * 2.5 + distance / 5.0);
+            (1.0 - stream_jump_rate) * 1.0 + stream_jump_rate * flow_aim_revert_factor * distance
+        } else {
+            1.0
+        }
+    }
+
+    fn calc_location_weight(pos: Pos, prev_pos: Pos) -> f64 {
+        let mut x = f64::from((pos.x + prev_pos.x) * 0.5);
+        let mut y = f64::from((pos.y + prev_pos.y) * 0.5);
+
+        x -= f64::from(PLAYFIELD_BASE_SIZE.x) / 2.0;
+        y -= f64::from(PLAYFIELD_BASE_SIZE.y) / 2.0;
+
+        let angel = PI / 3.0;
+        let a = (x * angel.cos() + y * angel.sin()) / 750.0;
+        let b = (x * angel.sin() - y * angel.cos()) / 1000.0;
+
+        let location_bonus = a * a + b * b;
+        1.0 + location_bonus
+    }
+
+    fn calc_distance_requirement(
+        delta_time: f64,
+        previous_delta_time: f64,
+        previous_distance: f64,
+    ) -> f64 {
+        if pplus::is_ratio_equal_greater(1.0, delta_time, previous_delta_time) {
+            let overlap_distance =
+                (previous_delta_time / delta_time) * OsuDifficultyObject::NORMALIZED_RADIUS * 2.0;
+            pplus::transition_to_true(previous_distance, 0.0, overlap_distance)
+        } else {
+            0.0
+        }
+    }
+
+    fn calc_reading_density(prev_base_flow: f64, prev_jump_dist: f64) -> f64 {
+        (1.0 - prev_base_flow * 0.75)
+            * (1.0
+                + prev_base_flow * 0.5 * prev_jump_dist
+                    / OsuDifficultyObject::NORMALIZED_RADIUS)
+    }
+
+    fn calc_flashlight_multiplier(
+        flashlight_enabled: bool,
+        raw_jump_distance: f64,
+        radius: f64,
+    ) -> f64 {
+        if flashlight_enabled {
+            1.0 + pplus::transition_to_true(
+                raw_jump_distance,
+                (PLAYFIELD_BASE_SIZE.y / 4.0).into(),
+                radius,
+            ) * 0.3
+        } else {
+            1.0
+        }
+    }
+
+    fn calc_small_circle_bonus(radius: f64) -> f64 {
+        1.0 + 120.0 / radius.powf(2.0)
+    }
+
+    fn calc_high_ar_multiplier(preempt: f64) -> f64 {
+        1.0 + (-((preempt - 325.0) / 30.0).tanh() + 1.0) / 15.0
     }
 }

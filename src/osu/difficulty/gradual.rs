@@ -106,6 +106,7 @@ impl OsuGradualDifficulty {
             &difficulty,
             &scaling_factor,
             osu_objects.iter_mut(),
+            time_preempt
         );
 
         let skills = OsuSkills::new(mods, &scaling_factor, &map_attrs, time_preempt);
@@ -157,9 +158,12 @@ impl Iterator for OsuGradualDifficulty {
             let curr = self.diff_objects.get(self.idx - 1)?;
 
             Skill::new(&mut self.skills.aim, &self.diff_objects).process(curr);
-            Skill::new(&mut self.skills.aim_no_sliders, &self.diff_objects).process(curr);
+            Skill::new(&mut self.skills.flow_aim, &self.diff_objects).process(curr);
+            Skill::new(&mut self.skills.jump_aim, &self.diff_objects).process(curr);
+            Skill::new(&mut self.skills.raw_aim, &self.diff_objects).process(curr);
             Skill::new(&mut self.skills.speed, &self.diff_objects).process(curr);
-            Skill::new(&mut self.skills.flashlight, &self.diff_objects).process(curr);
+            Skill::new(&mut self.skills.stamina, &self.diff_objects).process(curr);
+            Skill::new(&mut self.skills.rhythm, &self.diff_objects).process(curr);
 
             Self::increment_combo(curr.base, &mut self.attrs);
         } else if self.osu_objects.is_empty() {
@@ -171,19 +175,22 @@ impl Iterator for OsuGradualDifficulty {
         let mut attrs = self.attrs.clone();
 
         let aim_difficulty_value = self.skills.aim.as_difficulty_value();
-        let aim_no_sliders_difficulty_value = self.skills.aim_no_sliders.as_difficulty_value();
-        let speed_relevant_note_count = self.skills.speed.relevant_note_count();
+        let flow_aim_difficulty_value = self.skills.flow_aim.as_difficulty_value();
+        let jump_aim_difficulty_value = self.skills.jump_aim.as_difficulty_value();
+        let raw_aim_difficulty_value = self.skills.raw_aim.as_difficulty_value();
         let speed_difficulty_value = self.skills.speed.as_difficulty_value();
-        let flashlight_difficulty_value = self.skills.flashlight.as_difficulty_value();
+        let stamina_difficulty_value = self.skills.stamina.as_difficulty_value();
+        let rhythm_difficulty_value = self.skills.rhythm.as_difficulty_value();
 
         DifficultyValues::eval(
             &mut attrs,
-            self.difficulty.get_mods(),
             aim_difficulty_value,
-            aim_no_sliders_difficulty_value,
-            speed_difficulty_value,
-            speed_relevant_note_count,
-            flashlight_difficulty_value,
+            flow_aim_difficulty_value,
+            jump_aim_difficulty_value,
+            raw_aim_difficulty_value,
+            stamina_difficulty_value,
+            rhythm_difficulty_value,
+            speed_difficulty_value
         );
 
         Some(attrs)
@@ -207,15 +214,21 @@ impl Iterator for OsuGradualDifficulty {
         }
 
         let mut aim = Skill::new(&mut self.skills.aim, &self.diff_objects);
-        let mut aim_no_sliders = Skill::new(&mut self.skills.aim_no_sliders, &self.diff_objects);
+        let mut flow_aim = Skill::new(&mut self.skills.flow_aim, &self.diff_objects);
+        let mut jump_aim = Skill::new(&mut self.skills.jump_aim, &self.diff_objects);
+        let mut raw_aim = Skill::new(&mut self.skills.raw_aim, &self.diff_objects);
+        let mut stamina = Skill::new(&mut self.skills.stamina, &self.diff_objects);
+        let mut rhythm = Skill::new(&mut self.skills.rhythm, &self.diff_objects);
         let mut speed = Skill::new(&mut self.skills.speed, &self.diff_objects);
-        let mut flashlight = Skill::new(&mut self.skills.flashlight, &self.diff_objects);
 
         for curr in skip_iter.take(take) {
             aim.process(curr);
-            aim_no_sliders.process(curr);
+            flow_aim.process(curr);
+            jump_aim.process(curr);
+            raw_aim.process(curr);
+            stamina.process(curr);
+            rhythm.process(curr);
             speed.process(curr);
-            flashlight.process(curr);
 
             Self::increment_combo(curr.base, &mut self.attrs);
             self.idx += 1;
